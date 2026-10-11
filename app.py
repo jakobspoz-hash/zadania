@@ -38,6 +38,9 @@ CONTACT = os.environ.get("CONTACT_EMAIL", "")
 #   ROUTE_MODE=off    – wyłączone
 ROUTE_MODE = os.environ.get("ROUTE_MODE", "all").strip().lower()
 START_TIME = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 300))
+# Klasyfikacja AI (darmowy klucz z aistudio.google.com). Bez klucza: tylko słowa kluczowe.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
 API = "https://tasks.googleapis.com/tasks/v1"
 MARK_RE = re.compile(r"\s*\[sync:([A-Za-z0-9_\-]+)\]\s*$")
@@ -229,12 +232,48 @@ LIST_WORD_RE = r"(?:(?:do|na)\s+)?(?:list[ayęie]\s+)?"
 DOM_RE = re.compile(r"(?<!\w)(?:do\s+|na\s+)?(?:list[ayęie]\s+)?dom(?:ow[aąey]*)?(?!\w)", re.I)
 
 
+AI_PROMPT = """Przypisz zadanie domowe do jednej z list. Odpowiedz WYŁĄCZNIE cyfrą.
+0 = krótkoterminowe: sprawy na najbliższe dni – zakupy, sprzątanie, telefony, załatwienia, drobne naprawy
+1 = długoterminowe: większe projekty i plany na tygodnie/miesiące – remonty, malowanie, wyjazdy, duże zakupy, nauka
+2 = ćwiczenia: aktywność fizyczna – pompki, przysiady, bieganie, rozciąganie, trening, joga, rower, plank
+Zadanie: {title}
+Cyfra:"""
+
+
+def ai_classify(title):
+    """Zwraca indeks listy od AI albo None, gdy AI niedostępne."""
+    if not GEMINI_API_KEY:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    base = {"contents": [{"parts": [{"text": AI_PROMPT.format(title=title)}]}]}
+    configs = [
+        {"temperature": 0, "maxOutputTokens": 16, "thinkingConfig": {"thinkingBudget": 0}},
+        {"temperature": 0, "maxOutputTokens": 1024},
+    ]
+    for cfg in configs:
+        try:
+            r = requests.post(url, json=dict(base, generationConfig=cfg),
+                              headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=20)
+            if r.status_code == 400:
+                continue  # model nie obsługuje tej konfiguracji – próbujemy prostszej
+            r.raise_for_status()
+            parts = r.json()["candidates"][0].get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts)
+            m = re.search(r"[012]", text)
+            if m:
+                return int(m.group())
+        except Exception as e:  # noqa: BLE001
+            log.warning("AI niedostępne (%s) – używam listy domyślnej", str(e)[:150])
+            return None
+    return None
+
+
 def classify(title):
-    """Zwraca (indeks listy, oczyszczony tytuł, czy było słowo 'dom')."""
+    """Zwraca (indeks listy albo None gdy brak słowa kluczowego, oczyszczony tytuł, czy było 'dom')."""
     t = title.strip()
     had_dom = bool(DOM_RE.search(t))
     t = DOM_RE.sub(" ", t)
-    idx = 0
+    idx = None
     for i, words in KEYWORDS:
         pat = re.compile(LIST_WORD_RE + r"(?<!\w)(?:" + "|".join(map(re.escape, words)) + r")(?!\w)", re.I)
         if pat.search(t):
@@ -264,6 +303,12 @@ def route_default(acc, lists):
         idx, clean, had_dom = classify(title)
         if ROUTE_MODE == "prefix" and not had_dom:
             continue
+        how = "słowo kluczowe"
+        if idx is None:
+            idx = ai_classify(clean)
+            how = "AI"
+        if idx is None:
+            idx, how = 0, "domyślnie"
         target = targets[idx] if idx < len(targets) else None
         if not target or not clean:
             continue
@@ -271,7 +316,7 @@ def route_default(acc, lists):
                 "due": t.get("due") or None, "status": "needsAction"}
         acc.insert(target, {k: v for k, v in body.items() if v is not None})
         acc.delete(default_id, t["id"])
-        log.info("[%s] przeniesiono %r → %s", acc.name, clean, LIST_NAMES[idx])
+        log.info("[%s] przeniesiono %r → %s (%s)", acc.name, clean, LIST_NAMES[idx], how)
 
 
 def find_lists(acc):
