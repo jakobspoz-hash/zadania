@@ -40,7 +40,9 @@ ROUTE_MODE = os.environ.get("ROUTE_MODE", "all").strip().lower()
 START_TIME = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 300))
 # Klasyfikacja AI (darmowy klucz z aistudio.google.com). Bez klucza: tylko słowa kluczowe.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODELS = [m.strip() for m in os.environ.get(
+    "GEMINI_MODELS", "gemini-flash-lite-latest,gemini-flash-latest").split(",") if m.strip()]
+AI_RETRY_MINUTES = int(os.environ.get("AI_RETRY_MINUTES", "10"))
 
 API = "https://tasks.googleapis.com/tasks/v1"
 MARK_RE = re.compile(r"\s*\[sync:([A-Za-z0-9_\-]+)\]\s*$")
@@ -245,27 +247,32 @@ def ai_classify(title):
     """Zwraca indeks listy od AI albo None, gdy AI niedostępne."""
     if not GEMINI_API_KEY:
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     base = {"contents": [{"parts": [{"text": AI_PROMPT.format(title=title)}]}]}
     configs = [
         {"temperature": 0, "maxOutputTokens": 16, "thinkingConfig": {"thinkingBudget": 0}},
         {"temperature": 0, "maxOutputTokens": 1024},
     ]
-    for cfg in configs:
-        try:
-            r = requests.post(url, json=dict(base, generationConfig=cfg),
-                              headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=20)
+    for model in GEMINI_MODELS:        # przy przeciążeniu próbujemy kolejnego modelu
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for cfg in configs:
+            try:
+                r = requests.post(url, json=dict(base, generationConfig=cfg),
+                                  headers={"x-goog-api-key": GEMINI_API_KEY}, timeout=12)
+            except Exception as e:  # noqa: BLE001
+                log.warning("AI %s: %s", model, str(e)[:120])
+                break
             if r.status_code == 400:
-                continue  # model nie obsługuje tej konfiguracji – próbujemy prostszej
-            r.raise_for_status()
-            parts = r.json()["candidates"][0].get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts)
-            m = re.search(r"[012]", text)
+                continue               # model nie obsługuje tej konfiguracji – prostsza
+            if r.status_code != 200:
+                log.warning("AI %s: HTTP %s", model, r.status_code)
+                break
+            try:
+                parts = r.json()["candidates"][0].get("content", {}).get("parts", [])
+            except Exception:  # noqa: BLE001
+                break
+            m = re.search(r"[012]", "".join(p.get("text", "") for p in parts))
             if m:
                 return int(m.group())
-        except Exception as e:  # noqa: BLE001
-            log.warning("AI niedostępne (%s) – używam listy domyślnej", str(e)[:150])
-            return None
     return None
 
 
@@ -310,6 +317,11 @@ def route_default(acc, lists):
             idx = ai_classify(clean)
             how = "AI"
         if idx is None:
+            retry_until = time.strftime("%Y-%m-%dT%H:%M:%S",
+                                        time.gmtime(time.time() - AI_RETRY_MINUTES * 60))
+            if GEMINI_API_KEY and (t.get("updated") or "") > retry_until:
+                log.info("[%s] AI nie odpowiada – %r poczeka do kolejnej próby", acc.name, clean)
+                continue               # zostaje na liście domyślnej, spróbujemy za minutę
             idx, how = 0, "domyślnie"
         target = targets[idx] if idx < len(targets) else None
         if not target or not clean:
@@ -373,8 +385,8 @@ def sync_once():
 
 def loop():
     if GEMINI_API_KEY:
-        for probe in ("Zrobić 50 pompek", "Pomalować dom", "Kupić chleb"):
-            log.info("Test AI: %r → %s", probe, ai_classify(probe))
+        log.info("Test AI (%s): 'Zrobić 50 pompek' → %s", ",".join(GEMINI_MODELS),
+                 ai_classify("Zrobić 50 pompek"))
     else:
         log.info("Brak GEMINI_API_KEY – listę wybierają tylko słowa kluczowe")
     while True:
