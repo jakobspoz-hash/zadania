@@ -229,7 +229,8 @@ KEYWORDS = [
     (0, ["krótkoterminowe", "krótkoterminowa", "krotkoterminowe", "krótko", "krotko"]),
 ]
 LIST_WORD_RE = r"(?:(?:do|na)\s+)?(?:list[ayęie]\s+)?"
-DOM_RE = re.compile(r"(?<!\w)(?:do\s+|na\s+)?(?:list[ayęie]\s+)?dom(?:ow[aąey]*)?(?!\w)", re.I)
+# Słowo "dom" liczy się tylko na początku zadania i tylko w trybie ROUTE_MODE=prefix
+DOM_RE = re.compile(r"^\s*(?:do\s+|na\s+)?(?:list[ayęie]\s+)?dom(?:ow[aąey]*)?(?!\w)\s*[:,\-–]?", re.I)
 
 
 AI_PROMPT = """Przypisz zadanie domowe do jednej z list. Odpowiedz WYŁĄCZNIE cyfrą.
@@ -272,7 +273,8 @@ def classify(title):
     """Zwraca (indeks listy albo None gdy brak słowa kluczowego, oczyszczony tytuł, czy było 'dom')."""
     t = title.strip()
     had_dom = bool(DOM_RE.search(t))
-    t = DOM_RE.sub(" ", t)
+    if ROUTE_MODE == "prefix":
+        t = DOM_RE.sub(" ", t, count=1)
     idx = None
     for i, words in KEYWORDS:
         pat = re.compile(LIST_WORD_RE + r"(?<!\w)(?:" + "|".join(map(re.escape, words)) + r")(?!\w)", re.I)
@@ -370,6 +372,11 @@ def sync_once():
 
 
 def loop():
+    if GEMINI_API_KEY:
+        for probe in ("Zrobić 50 pompek", "Pomalować dom", "Kupić chleb"):
+            log.info("Test AI: %r → %s", probe, ai_classify(probe))
+    else:
+        log.info("Brak GEMINI_API_KEY – listę wybierają tylko słowa kluczowe")
     while True:
         try:
             sync_once()
