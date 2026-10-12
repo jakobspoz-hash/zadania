@@ -10,6 +10,7 @@ Zmienne środowiskowe (Render → Environment):
   SYNC_INTERVAL (opcjonalnie) – sekundy między synchronizacjami, domyślnie 60
   CONTACT_EMAIL (opcjonalnie) – e-mail na stronie polityki prywatności
 """
+import faulthandler
 import html
 import logging
 import os
@@ -389,12 +390,23 @@ def loop():
                  ai_classify("Zrobić 50 pompek"))
     else:
         log.info("Brak GEMINI_API_KEY – listę wybierają tylko słowa kluczowe")
+    n = 0
     while True:
+        n += 1
+        t0 = time.time()
+        faulthandler.dump_traceback_later(150, repeat=False)   # diagnostyka zawieszeń
         try:
             sync_once()
+            dt = time.time() - t0
+            if n <= 3 or n % 60 == 0 or dt > 20:
+                lists = state["snapshot"]["lists"]
+                log.info("Synchronizacja #%d OK (%.1fs): %s", n, dt,
+                         ", ".join(f"{l['title']}={len(l['tasks'])}" for l in lists))
         except Exception as e:  # noqa: BLE001
             log.exception("Błąd synchronizacji")
             state["last_error"] = str(e)[:300]
+        finally:
+            faulthandler.cancel_dump_traceback_later()
         wake.wait(SYNC_INTERVAL)
         wake.clear()
 
@@ -444,7 +456,9 @@ def privacy():
 
 @app.get("/health")
 def health():
-    return "ok"
+    age = int(time.time() - state["last_sync"]) if state["last_sync"] else -1
+    return jsonify({"ok": True, "last_sync_age_s": age,
+                    "error": bool(state["last_error"])})
 
 
 @app.get("/api/tasks")
