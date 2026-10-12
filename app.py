@@ -522,6 +522,9 @@ def api_tasks_txt():
     return "\n".join(out) + "\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
+_toggle_hist = {}
+
+
 def _set_status(status):
     require_key()
     if not ACC_A:
@@ -531,6 +534,15 @@ def _set_status(status):
     tid = j.get("task") or request.values.get("task")
     if not lid or not tid:
         abort(400)
+    # bezpiecznik: to samo zadanie przełączane ciągle (np. fantomowy dotyk) – ignoruj
+    now = time.time()
+    hist = [t for t in _toggle_hist.get(tid, []) if now - t < 60]
+    if len(hist) >= 4:
+        log.warning("[ekran] %s przełączane zbyt często – ignoruję", tid)
+        _toggle_hist[tid] = hist
+        return jsonify({"ok": False, "reason": "too_many_toggles"}), 429
+    hist.append(now)
+    _toggle_hist[tid] = hist
     body = {"status": status}
     if status == "needsAction":
         body["completed"] = None
