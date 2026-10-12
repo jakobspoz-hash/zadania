@@ -411,13 +411,39 @@ def loop():
         wake.clear()
 
 
-if ACC_A and CLIENT_ID:
-    threading.Thread(target=loop, daemon=True).start()
-else:
+_sync_pid = None
+_sync_start_lock = threading.Lock()
+
+
+def ensure_sync_thread():
+    """Uruchamia wątek synchronizacji w procesie, który obsługuje zapytania.
+
+    Nie startujemy go przy imporcie: gunicorn może załadować moduł w procesie
+    głównym i potem rozwidlić workera – wątek zostałby w innym procesie niż
+    dane, które czyta ESP32."""
+    global _sync_pid
+    if not (ACC_A and CLIENT_ID):
+        return
+    pid = os.getpid()
+    if _sync_pid == pid:
+        return
+    with _sync_start_lock:
+        if _sync_pid != pid:
+            _sync_pid = pid
+            threading.Thread(target=loop, daemon=True).start()
+            log.info("Wątek synchronizacji uruchomiony (pid %s)", pid)
+
+
+if not (ACC_A and CLIENT_ID):
     log.warning("Brak tokenów/klienta – synchronizacja wyłączona (strony www działają)")
 
 
 # ---------------------------------------------------------------- HTTP
+
+@app.before_request
+def _start_sync():
+    ensure_sync_thread()
+
 
 def require_key():
     if not API_KEY or request.headers.get("X-Api-Key") != API_KEY:
