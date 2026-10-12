@@ -461,23 +461,60 @@ def api_status():
                     "two_accounts": bool(ACC_B)})
 
 
-@app.post("/api/complete")
-def api_complete():
-    """Body JSON: {"list": "<id listy>", "task": "<id zadania>"} – odhacza na koncie A."""
+def _clean(s):
+    return " ".join((s or "").replace("\t", " ").split())
+
+
+@app.get("/api/tasks.txt")
+def api_tasks_txt():
+    """Prosty format dla ESP32 (bez JSON-a). Linie rozdzielone \\n, pola tabulatorem:
+       L <id listy> <nazwa>      – początek listy
+       T <id zadania> <tytuł> <termin RRRR-MM-DD lub pusty>
+       END                        – koniec (brak = niepełna odpowiedź)"""
+    require_key()
+    snap = state["snapshot"]
+    out = [f"S\t{snap.get('updated', 0)}\t{state['last_error'] or ''}"]
+    for l in snap["lists"]:
+        out.append(f"L\t{l['id'] or ''}\t{_clean(l['title'])}")
+        for t in l["tasks"]:
+            out.append(f"T\t{t['id']}\t{_clean(t['title'])}\t{t.get('due', '')}")
+    out.append("END")
+    return "\n".join(out) + "\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+def _set_status(status):
     require_key()
     if not ACC_A:
         abort(503)
     j = request.get_json(force=True, silent=True) or {}
-    lid, tid = j.get("list"), j.get("task")
+    lid = j.get("list") or request.values.get("list")
+    tid = j.get("task") or request.values.get("task")
     if not lid or not tid:
         abort(400)
+    body = {"status": status}
+    if status == "needsAction":
+        body["completed"] = None
     with lock:
-        ACC_A.patch(lid, tid, {"status": "completed"})
-        for l in state["snapshot"]["lists"]:
-            if l["id"] == lid:
-                l["tasks"] = [t for t in l["tasks"] if t["id"] != tid]
-    wake.set()  # przyspiesz synchronizację z kontem B
+        ACC_A.patch(lid, tid, body)
+        if status == "completed":
+            for l in state["snapshot"]["lists"]:
+                if l["id"] == lid:
+                    l["tasks"] = [t for t in l["tasks"] if t["id"] != tid]
+    log.info("[ekran] %s → %s", tid, status)
+    wake.set()  # przebuduj migawkę i zsynchronizuj z kontem B
     return jsonify({"ok": True})
+
+
+@app.post("/api/complete")
+def api_complete():
+    """{"list": "<id listy>", "task": "<id zadania>"} (JSON lub formularz) – odhacza."""
+    return _set_status("completed")
+
+
+@app.post("/api/uncomplete")
+def api_uncomplete():
+    """Cofa odhaczenie (gdy ktoś stuknął przez pomyłkę)."""
+    return _set_status("needsAction")
 
 
 if __name__ == "__main__":
